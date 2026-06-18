@@ -23,15 +23,21 @@ def local_css():
     /* Remove espaço vazio no topo (header padrão do Streamlit) e ajusta margens da página */
     header {visibility: hidden; height: 0px !important; padding: 0px !important;}
     .block-container {
-        padding-top: 1rem !important; 
+        padding-top: 2rem !important; 
         padding-bottom: 1rem !important;
-        margin-top: -2rem !important;
+        margin-top: -1.5rem !important;
     }
     
-    /* Força o menu lateral (sidebar) a ser mais estreito */
-    [data-testid="stSidebar"] {
-        min-width: 240px !important;
-        max-width: 240px !important;
+    /* Oculta completamente o menu lateral (sidebar) */
+    [data-testid="collapsedControl"] { display: none !important; }
+    section[data-testid="stSidebar"] { display: none !important; width: 0px !important; }
+    
+    /* Personaliza o st.segmented_control para o menu superior */
+    div[data-testid="stSegmentedControl"] {
+        background-color: rgba(30, 41, 59, 0.4);
+        padding: 4px;
+        border-radius: 12px;
+        border: 1px solid #334155;
     }
     
     #MainMenu {visibility: hidden;}
@@ -61,30 +67,74 @@ def fetch_data(endpoint: str, params: dict = None):
         st.warning(f"Não foi possível obter dados (Endpoint: {endpoint})")
         return None
 
-def apply_chart_theme(fig):
-    fig.update_layout(
+@st.cache_data(ttl=86400)
+def get_ibge_mapping():
+    try:
+        res = requests.get("https://servicodados.ibge.gov.br/api/v1/localidades/municipios", timeout=10)
+        if res.status_code == 200:
+            return {str(m["id"]): m["nome"] for m in res.json()}
+    except Exception:
+        pass
+    return {}
+
+def apply_chart_theme(fig, is_currency_y=True, is_currency_x=False):
+    layout_update = dict(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         font=dict(color="#94A3B8", size=10),
         margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(showgrid=True, gridcolor="#334155", zeroline=False),
-        yaxis=dict(showgrid=True, gridcolor="#334155", zeroline=False),
+        separators=",.",
         legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5, title=None)
     )
+    
+    xaxis_dict = dict(showgrid=True, gridcolor="#334155", zeroline=False)
+    if is_currency_x:
+        xaxis_dict.update(tickprefix="R$ ", tickformat=",.2f")
+        
+    yaxis_dict = dict(showgrid=True, gridcolor="#334155", zeroline=False)
+    if is_currency_y:
+        yaxis_dict.update(tickprefix="R$ ", tickformat=",.2f")
+        
+    layout_update["xaxis"] = xaxis_dict
+    layout_update["yaxis"] = yaxis_dict
+    
+    fig.update_layout(**layout_update)
     return fig
 
 COLOR_PALETTE = ["#3B82F6", "#10B981", "#8B5CF6", "#F59E0B", "#EF4444", "#06B6D4"]
+AVAILABLE_YEARS = list(range(2025, 2017, -1))
 
 # ==========================================
-# MENU LATERAL
+# CABEÇALHO SUPERIOR (HORIZONTAL)
 # ==========================================
-st.sidebar.title("DataCrypt")
-st.sidebar.markdown("<p style='color: #94A3B8; font-size: 0.9em; margin-top: -15px;'>Inteligência Financeira</p>", unsafe_allow_html=True)
-st.sidebar.markdown("---")
-page = st.sidebar.radio("Navegação", ["Visão Macro Nacional", "Análise de Município", "Rankings Consolidados"])
-st.sidebar.markdown("---")
+header_container = st.container()
+with header_container:
+    col_logo, col_nav = st.columns([1, 2.5], vertical_alignment="center")
+
+    with col_logo:
+        st.markdown(
+            "<h1 style='margin: 0px; padding-top: 8px; color: #3B82F6; font-size: 1.8rem; font-weight: 700; letter-spacing: -0.5px; line-height: 1;'>DataCrypt</h1>", 
+            unsafe_allow_html=True
+        )
+
+    with col_nav:
+        page = st.segmented_control(
+            "Navegação", 
+            ["Macro (Siconfi)", "Município (Siconfi)", "Rankings (Siconfi)", "Macro (Social)", "Município (Social)"], 
+            default="Macro (Siconfi)",
+            label_visibility="collapsed"
+        )
+
+st.markdown("<hr style='margin-top: 1.5rem; margin-bottom: 25px; border-top: 1px solid #1E293B;'>", unsafe_allow_html=True)
+
+if not page:
+    page = "Macro (Siconfi)"
 
 def format_currency(val):
+    try:
+        val = float(val)
+    except (ValueError, TypeError):
+        return str(val)
     return f"R$ {val:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
 # ==========================================
@@ -95,7 +145,7 @@ def render_macro_view():
     
     col_f1, col_f2 = st.columns(2)
     with col_f1:
-        ano = st.selectbox("Exercício Financeiro", [2020, 2019])
+        ano = st.selectbox("Exercício Financeiro", AVAILABLE_YEARS)
     with col_f2:
         uf = st.text_input("Filtrar por UF (Ex: SP)", "").strip().upper()
         
@@ -153,7 +203,8 @@ def render_macro_view():
                 fig3 = px.pie(df_pie, values="Valor", names="Área", hole=0.6,
                               title="Distribuição do Orçamento",
                               color_discrete_sequence=COLOR_PALETTE)
-                apply_chart_theme(fig3)
+                apply_chart_theme(fig3, is_currency_y=False)
+                fig3.update_traces(hovertemplate="%{label}<br>R$ %{value:,.2f}<br>(%{percent})")
                 fig3.update_layout(legend=dict(y=-0.5)) # Adjust pie legend specifically
                 st.plotly_chart(fig3, use_container_width=True)
     elif data is not None:
@@ -180,7 +231,10 @@ def render_municipio_view():
             df = df.sort_values(by=["ano", "periodo"])
             df["Período"] = df["ano"].astype(str) + " / B" + df["periodo"].astype(str)
             
-            st.subheader(f"Evolução: {indicador.replace('_', ' ').title()}")
+            ibge_map = get_ibge_mapping()
+            nome_mun = ibge_map.get(str(cod_ibge), str(cod_ibge))
+            
+            st.subheader(f"Evolução: {indicador.replace('_', ' ').title()} - {nome_mun}")
             g1, g2, g3 = st.columns(3)
             
             with g1:
@@ -217,7 +271,7 @@ def render_ranking_view():
     
     c1, c2, c3, c4 = st.columns(4)
     with c1:
-        ano = st.selectbox("Exercício", [2020, 2019])
+        ano = st.selectbox("Exercício", AVAILABLE_YEARS)
     with c2:
         indicador = st.selectbox("Métrica Comparativa", ["receita_total", "despesa_total", "despesa_saude", "despesa_educacao", "investimentos"])
     with c3:
@@ -235,10 +289,14 @@ def render_ranking_view():
         df = pd.DataFrame(data)
         if "cod_ibge" in df.columns and "valor" in df.columns:
             df_sorted = df.sort_values(by="valor", ascending=True)
-            if "uf" in df_sorted.columns:
-                df_sorted["Município"] = df_sorted["cod_ibge"].astype(str) + " - " + df_sorted["uf"]
-            else:
-                df_sorted["Município"] = df_sorted["cod_ibge"].astype(str)
+            
+            ibge_map = get_ibge_mapping()
+            def map_nome(row):
+                cod = str(row["cod_ibge"])
+                nome = ibge_map.get(cod, cod)
+                return f"{nome} - {row['uf']}" if "uf" in row else nome
+                
+            df_sorted["Município"] = df_sorted.apply(map_nome, axis=1)
                 
             st.subheader(f"Dashboard Comparativo (Top {limit})")
             g1, g2, g3 = st.columns(3)
@@ -248,18 +306,19 @@ def render_ranking_view():
                 fig_bar = px.bar(df_sorted, x="valor", y="Município", orientation='h',
                              title="Ranking de Volume",
                              color="valor", color_continuous_scale="Blues")
-                apply_chart_theme(fig_bar)
+                apply_chart_theme(fig_bar, is_currency_y=False, is_currency_x=True)
                 fig_bar.update_layout(coloraxis_showscale=False)
                 st.plotly_chart(fig_bar, use_container_width=True)
                 
             with g2:
-                # Treemap do Peso de Cada um no Top N
-                fig_tree = px.treemap(df_sorted, path=["Município"], values="valor",
-                                      title="Proporção no Top N",
-                                      color="valor", color_continuous_scale="Blues")
-                apply_chart_theme(fig_tree)
-                fig_tree.update_layout(coloraxis_showscale=False, margin=dict(t=30, l=10, r=10, b=10))
-                st.plotly_chart(fig_tree, use_container_width=True)
+                # Gráfico de Rosca (Donut) para proporção no Top N
+                fig_pie = px.pie(df_sorted, values="valor", names="Município", hole=0.5,
+                                 title="Proporção no Top N",
+                                 color_discrete_sequence=COLOR_PALETTE)
+                apply_chart_theme(fig_pie, is_currency_y=False)
+                fig_pie.update_traces(textposition='inside', textinfo='percent', hovertemplate="%{label}<br>R$ %{value:,.2f}<br>(%{percent})")
+                fig_pie.update_layout(showlegend=False, margin=dict(t=30, l=10, r=10, b=10))
+                st.plotly_chart(fig_pie, use_container_width=True)
                 
             with g3:
                 # Tabela de dados limpa (apenas nome e formatado)
@@ -271,9 +330,125 @@ def render_ranking_view():
     elif data is not None:
         st.info("Ranking indisponível.")
 
-if page == "Visão Macro Nacional":
+def render_social_macro_view():
+    st.title("Agregação e Rankings (Social)")
+    
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        ano = st.selectbox("Exercício", AVAILABLE_YEARS, key="soc_ano")
+    with c2:
+        tipo = st.selectbox("Benefício", ["bolsa_familia", "auxilio_brasil", "novo_bolsa_familia"])
+    with c3:
+        uf = st.text_input("Filtrar por UF (Opc)", "").strip().upper()
+        
+    params = {"tipoBeneficio": tipo, "ano": ano}
+    if uf: params["uf"] = uf
+        
+    st.markdown("---")
+    
+    st.subheader("Visão Consolidada Mensal")
+    data_agg = fetch_data("/transparencia/beneficios/analytics/agregacao", params=params)
+    
+    if data_agg:
+        df_agg = pd.DataFrame(data_agg)
+        if "valor_total" in df_agg.columns:
+            df_agg["valor_total"] = pd.to_numeric(df_agg["valor_total"], errors="coerce").fillna(0)
+            df_agg["quantidade_beneficiados_total"] = pd.to_numeric(df_agg["quantidade_beneficiados_total"], errors="coerce").fillna(0)
+            
+            total_rs = df_agg["valor_total"].sum()
+            total_pessoas = df_agg["quantidade_beneficiados_total"].sum()
+            
+            m1, m2 = st.columns(2)
+            m1.metric("Valor Total Repassado", format_currency(total_rs))
+            m2.metric("Total de Beneficiados (Soma)", f"{total_pessoas:,.0f}".replace(",", "."))
+            
+            df_agg = df_agg.sort_values(by="mes")
+            fig_line = px.line(df_agg, x="mes", y="valor_total", markers=True, title="Evolução de Repasses por Mês", color_discrete_sequence=["#10B981"])
+            apply_chart_theme(fig_line)
+            st.plotly_chart(fig_line, use_container_width=True)
+    else:
+        st.info("Nenhum dado consolidado encontrado.")
+        
+    st.markdown("---")
+    st.subheader("Top Municípios Beneficiados")
+    
+    limit = st.slider("Top N Municípios", 5, 50, 10, key="soc_limit")
+    params_rank = params.copy()
+    params_rank["limit"] = limit
+    
+    data_rank = fetch_data("/transparencia/beneficios/analytics/ranking", params=params_rank)
+    if data_rank:
+        df_rank = pd.DataFrame(data_rank)
+        if "nome_municipio" in df_rank.columns:
+            df_rank["valor_total"] = pd.to_numeric(df_rank["valor_total"], errors="coerce").fillna(0)
+            df_rank["quantidade_beneficiados_total"] = pd.to_numeric(df_rank["quantidade_beneficiados_total"], errors="coerce").fillna(0)
+            
+            df_rank["Município"] = df_rank["nome_municipio"] + " - " + df_rank["uf"]
+            df_rank = df_rank.sort_values(by="valor_total", ascending=True)
+            
+            r1, r2 = st.columns(2)
+            with r1:
+                fig_bar = px.bar(df_rank, x="valor_total", y="Município", orientation='h', title="Ranking por Volume (R$)", color="valor_total", color_continuous_scale="Greens")
+                apply_chart_theme(fig_bar, is_currency_y=False, is_currency_x=True)
+                fig_bar.update_layout(coloraxis_showscale=False)
+                st.plotly_chart(fig_bar, use_container_width=True)
+            
+            with r2:
+                fig_pie = px.pie(df_rank, values="valor_total", names="Município", hole=0.5, title="Proporção no Top N", color_discrete_sequence=COLOR_PALETTE)
+                apply_chart_theme(fig_pie, is_currency_y=False)
+                fig_pie.update_traces(textposition='inside', textinfo='percent', hovertemplate="%{label}<br>R$ %{value:,.2f}<br>(%{percent})")
+                fig_pie.update_layout(showlegend=False, margin=dict(t=30, l=10, r=10, b=10))
+                st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.info("Nenhum ranking encontrado.")
+
+def render_social_municipio_view():
+    st.title("Histórico Municipal (Social)")
+    
+    c1, c2 = st.columns(2)
+    with c1:
+        cod_ibge = st.number_input("Código IBGE", min_value=1000000, max_value=9999999, value=3550308, step=1, key="soc_ibge")
+    with c2:
+        tipo = st.selectbox("Benefício", ["bolsa_familia", "auxilio_brasil", "novo_bolsa_familia"], key="soc_tipo")
+        
+    st.markdown("---")
+    params = {"tipoBeneficio": tipo, "codigoIbge": cod_ibge}
+    data = fetch_data("/transparencia/beneficios/analytics/serie-historica", params=params)
+    
+    if data:
+        df = pd.DataFrame(data)
+        if "ano" in df.columns and "mes" in df.columns:
+            df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
+            df["quantidade_beneficiados"] = pd.to_numeric(df["quantidade_beneficiados"], errors="coerce").fillna(0)
+            
+            df["Período"] = df["ano"].astype(str) + "-" + df["mes"].astype(str).str.zfill(2)
+            df = df.sort_values(by=["ano", "mes"])
+            
+            ibge_map = get_ibge_mapping()
+            nome_mun = ibge_map.get(str(cod_ibge), str(cod_ibge))
+            st.subheader(f"Evolução de Repasses: {nome_mun}")
+            
+            g1, g2 = st.columns(2)
+            with g1:
+                fig_area = px.area(df, x="Período", y="valor", markers=True, title="Volume Financeiro (R$)", color_discrete_sequence=["#10B981"])
+                fig_area.update_traces(fillcolor="rgba(16, 185, 129, 0.2)")
+                apply_chart_theme(fig_area)
+                st.plotly_chart(fig_area, use_container_width=True)
+                
+            with g2:
+                fig_bar = px.bar(df, x="Período", y="quantidade_beneficiados", title="Quantidade de Beneficiados", color_discrete_sequence=["#3B82F6"])
+                apply_chart_theme(fig_bar, is_currency_y=False)
+                st.plotly_chart(fig_bar, use_container_width=True)
+    else:
+        st.info("Nenhum dado histórico encontrado.")
+
+if page == "Macro (Siconfi)":
     render_macro_view()
-elif page == "Análise de Município":
+elif page == "Município (Siconfi)":
     render_municipio_view()
-elif page == "Rankings Consolidados":
+elif page == "Rankings (Siconfi)":
     render_ranking_view()
+elif page == "Macro (Social)":
+    render_social_macro_view()
+elif page == "Município (Social)":
+    render_social_municipio_view()
