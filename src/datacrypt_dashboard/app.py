@@ -11,6 +11,11 @@ st.set_page_config(layout="wide", page_title="DataCrypt Dashboard")
 def local_css():
     st.markdown("""
     <style>
+    /* Fundo geral da aplicação mais escuro */
+    .stApp {
+        background-color: #040914 !important;
+    }
+
     /* Estilo dos Cards de Métricas */
     div[data-testid="stMetric"] {
         background-color: #1E293B;
@@ -20,7 +25,7 @@ def local_css():
         box-shadow: 0 1px 3px rgba(0,0,0,0.12);
     }
     
-    /* Remove espaço vazio no topo (header padrão do Streamlit) e ajusta margens da página */
+    /* Remove espaço vazio no topo */
     header {visibility: hidden; height: 0px !important; padding: 0px !important;}
     .block-container {
         padding-top: 2rem !important; 
@@ -35,9 +40,29 @@ def local_css():
     /* Personaliza o st.segmented_control para o menu superior */
     div[data-testid="stSegmentedControl"] {
         background-color: rgba(30, 41, 59, 0.4);
-        padding: 4px;
+        padding: 6px;
         border-radius: 12px;
         border: 1px solid #334155;
+        width: 100%;
+    }
+    
+    /* Aumenta as fontes do menu */
+    div[data-testid="stSegmentedControl"] p {
+        font-size: 1.1rem !important;
+        font-weight: 500 !important;
+        padding: 4px 10px !important;
+    }
+
+    /* Media query para "Meia Tela" (telas menores que 900px) */
+    @media (max-width: 900px) {
+        div[data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+        }
+        div[data-testid="stHorizontalBlock"] > div {
+            min-width: 100% !important;
+            width: 100% !important;
+            padding-bottom: 1rem;
+        }
     }
     
     #MainMenu {visibility: hidden;}
@@ -76,6 +101,30 @@ def get_ibge_mapping():
     except Exception:
         pass
     return {}
+
+@st.cache_data(ttl=86400)
+def get_ibge_full_mapping():
+    try:
+        res = requests.get("https://servicodados.ibge.gov.br/api/v1/localidades/municipios", timeout=10)
+        if res.status_code == 200:
+            def extract_uf(m):
+                if m.get("microrregiao"):
+                    return m["microrregiao"]["mesorregiao"]["UF"]["sigla"]
+                elif m.get("regiao-imediata"):
+                    return m["regiao-imediata"]["regiao-intermediaria"]["UF"]["sigla"]
+                return "XX"
+            
+            return [
+                {
+                    "id": str(m["id"]),
+                    "nome": m["nome"],
+                    "uf": extract_uf(m)
+                }
+                for m in res.json()
+            ]
+    except Exception:
+        pass
+    return []
 
 def apply_chart_theme(fig, is_currency_y=True, is_currency_x=False):
     layout_update = dict(
@@ -405,28 +454,87 @@ def render_social_macro_view():
 def render_social_municipio_view():
     st.title("Histórico Municipal (Social)")
     
-    c1, c2 = st.columns(2)
-    with c1:
-        cod_ibge = st.number_input("Código IBGE", min_value=1000000, max_value=9999999, value=3550308, step=1, key="soc_ibge")
-    with c2:
-        tipo = st.selectbox("Benefício", ["bolsa_familia", "auxilio_brasil", "novo_bolsa_familia"], key="soc_tipo")
-        
-    st.markdown("---")
-    params = {"tipoBeneficio": tipo, "codigoIbge": cod_ibge}
-    data = fetch_data("/transparencia/beneficios/analytics/serie-historica", params=params)
+    mun_list = get_ibge_full_mapping()
     
-    if data:
-        df = pd.DataFrame(data)
-        if "ano" in df.columns and "mes" in df.columns:
+    c1, c2, c3, c4 = st.columns(4)
+    with c1:
+        ano = st.selectbox("Exercício", AVAILABLE_YEARS, key="soc_mun_ano")
+    with c2:
+        tipo = st.selectbox("Benefício", ["bolsa_familia", "auxilio_brasil", "novo_bolsa_familia"], key="soc_mun_tipo")
+    with c3:
+        ufs_disponiveis = sorted(list(set(m["uf"] for m in mun_list))) if mun_list else ["SP"]
+        uf = st.selectbox("Estado (UF)", ufs_disponiveis, index=ufs_disponiveis.index("SP") if "SP" in ufs_disponiveis else 0)
+    with c4:
+        municipios_uf = [m for m in mun_list if m["uf"] == uf]
+        nomes_mun = sorted([m["nome"] for m in municipios_uf]) if municipios_uf else ["Desconhecido"]
+        default_mun = "São Paulo" if uf == "SP" else nomes_mun[0]
+        nome_mun = st.selectbox("Município", nomes_mun, index=nomes_mun.index(default_mun) if default_mun in nomes_mun else 0)
+        
+    cod_ibge = None
+    if municipios_uf:
+        for m in municipios_uf:
+            if m["nome"] == nome_mun:
+                cod_ibge = m["id"]
+                break
+                
+    st.markdown("---")
+    if not cod_ibge:
+        st.warning("Não foi possível carregar os códigos dos municípios. Tente novamente.")
+        return
+        
+    st.subheader(f"Panorama Estadual: {uf} - {ano}")
+    
+    col_est1, col_est2 = st.columns(2)
+    
+    with col_est1:
+        params_ranking = {"tipoBeneficio": tipo, "ano": ano, "uf": uf, "limit": 10}
+        data_ranking = fetch_data("/transparencia/beneficios/analytics/ranking", params=params_ranking)
+        if data_ranking:
+            df_rk = pd.DataFrame(data_ranking)
+            if not df_rk.empty:
+                df_rk["valor_total"] = pd.to_numeric(df_rk["valor_total"], errors="coerce").fillna(0)
+                if "nome_municipio" not in df_rk.columns:
+                    ibge_map = {str(m["id"]): m["nome"] for m in mun_list}
+                    df_rk["nome_municipio"] = df_rk["codigo_ibge"].astype(str).map(ibge_map).fillna(df_rk["codigo_ibge"].astype(str))
+                df_rk = df_rk.sort_values(by="valor_total", ascending=True)
+                fig_rk = px.bar(df_rk, x="valor_total", y="nome_municipio", orientation="h", title="Top 10 Maiores Repasses (R$)", color_discrete_sequence=["#F59E0B"])
+                apply_chart_theme(fig_rk)
+                st.plotly_chart(fig_rk, use_container_width=True)
+                
+    with col_est2:
+        params_estado = {"tipoBeneficio": tipo, "ano": ano, "uf": uf}
+        data_estado = fetch_data("/transparencia/beneficios/analytics/agregacao", params=params_estado)
+        if data_estado:
+            df_est = pd.DataFrame(data_estado)
+            if not df_est.empty and "mes" in df_est.columns:
+                df_est["quantidade_beneficiados_total"] = pd.to_numeric(df_est["quantidade_beneficiados_total"], errors="coerce").fillna(0)
+                df_est = df_est.sort_values(by="mes")
+                df_est["Mês"] = df_est["mes"].astype(str).str.zfill(2)
+                fig_est = px.area(df_est, x="Mês", y="quantidade_beneficiados_total", markers=True, title="Evolução de Beneficiários no Estado", color_discrete_sequence=["#8B5CF6"])
+                fig_est.update_traces(fillcolor="rgba(139, 92, 246, 0.2)")
+                apply_chart_theme(fig_est, is_currency_y=False)
+                st.plotly_chart(fig_est, use_container_width=True)
+
+    st.markdown("---")
+    
+    # Quando o backend liberar o novo endpoint, basta alterar a URL e adicionar UF e Ano nos parâmetros
+    params = {"tipoBeneficio": tipo, "ano": ano, "uf": uf, "codigoIbge": cod_ibge}
+    data = fetch_data("/transparencia/beneficios/analytics/municipio-kpis", params=params)
+    
+    if data and isinstance(data, dict):
+        historico = data.get("historico_mensal_municipio", [])
+        df = pd.DataFrame(historico)
+        if not df.empty and "mes" in df.columns:
+            # O backend já filtrou pelo ano, basta fixar a coluna de ano para a formatação
+            df["ano"] = ano
+            
             df["valor"] = pd.to_numeric(df["valor"], errors="coerce").fillna(0)
             df["quantidade_beneficiados"] = pd.to_numeric(df["quantidade_beneficiados"], errors="coerce").fillna(0)
             
             df["Período"] = df["ano"].astype(str) + "-" + df["mes"].astype(str).str.zfill(2)
-            df = df.sort_values(by=["ano", "mes"])
+            df = df.sort_values(by="mes")
             
-            ibge_map = get_ibge_mapping()
-            nome_mun = ibge_map.get(str(cod_ibge), str(cod_ibge))
-            st.subheader(f"Evolução de Repasses: {nome_mun}")
+            st.subheader(f"Evolução de Repasses: {nome_mun} ({uf}) - {ano}")
             
             g1, g2 = st.columns(2)
             with g1:
@@ -436,9 +544,35 @@ def render_social_municipio_view():
                 st.plotly_chart(fig_area, use_container_width=True)
                 
             with g2:
-                fig_bar = px.bar(df, x="Período", y="quantidade_beneficiados", title="Quantidade de Beneficiados", color_discrete_sequence=["#3B82F6"])
-                apply_chart_theme(fig_bar, is_currency_y=False)
-                st.plotly_chart(fig_bar, use_container_width=True)
+                fig_area2 = px.area(df, x="Período", y="quantidade_beneficiados", markers=True, title="Quantidade de Beneficiados", color_discrete_sequence=["#3B82F6"])
+                fig_area2.update_traces(fillcolor="rgba(59, 130, 246, 0.2)")
+                apply_chart_theme(fig_area2, is_currency_y=False)
+                st.plotly_chart(fig_area2, use_container_width=True)
+                
+            st.markdown("---")
+            st.subheader("Indicadores Analíticos")
+            k1, k2, k3 = st.columns(3)
+            
+            try:
+                media_mun = float(data.get("media_beneficiarios_municipio") or 0)
+            except (ValueError, TypeError):
+                media_mun = 0.0
+                
+            try:
+                valor_medio_mun = float(data.get("valor_medio_mensal_municipio") or 0)
+            except (ValueError, TypeError):
+                valor_medio_mun = 0.0
+                
+            try:
+                taxa_var = float(data.get("taxa_variacao_beneficiarios_municipio") or 0)
+            except (ValueError, TypeError):
+                taxa_var = 0.0
+            
+            k1.metric(f"Média Beneficiários (Mun)", f"{media_mun:,.0f}".replace(",", "."))
+            k2.metric("Média Mensal Recebida", format_currency(valor_medio_mun))
+            k3.metric(f"Variação Mensal (MoM)", f"{taxa_var*100:+.1f}%")
+        else:
+            st.info(f"Nenhum repasse encontrado para {nome_mun} ({uf}) no ano de {ano}.")
     else:
         st.info("Nenhum dado histórico encontrado.")
 
